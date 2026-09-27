@@ -1,0 +1,18 @@
+# --- Dressmaker Build Calculator ---
+# Rule of thumb: if the SPA doesn't load it at runtime, it doesn't belong here.
+
+node_modules/
+*.log
+.DS_Store
+
+# build scratch
+assets/_manifest.json
+assets/_full_export/
+data/_raw/
+
+# The datamine workspace lives as a SIBLING (../_dm_extract) and is NEVER
+# committed here — raw YAML, decompiled C#, the full 294 MB icon export, and the
+# extractor scripts all stay out. If you ever nest it, ignore it:
+# _*_extract/
+
+# NOTE: data.js and assets/icons/** ARE committed on purpose — Pages serves them.
