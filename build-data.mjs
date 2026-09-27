@@ -248,6 +248,18 @@ if (assetReport.missing) warnings.push(`${assetReport.missing} manifest source(s
 if (assetReport.failed) errors.push(`${assetReport.failed} asset(s) failed to process`);
 fs.rmSync(manifestPath, { force: true });
 
+// ── segment component sketches into regions (blue-channel IDs) ────
+// Bake a per-region ID into each sketch's unused blue channel so the doll can colour
+// each garment sub-region independently and hit-test clicks (see tools/segment_regions.py).
+// Idempotent (derives IDs from R/A), so it runs every build.
+{
+  const seg = spawnSync("python", ["tools/segment_regions.py", path.join("assets", "icons")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (seg.status !== 0) { console.error("segment_regions.py failed:\n" + (seg.stderr || seg.stdout)); process.exit(1); }
+  let sr = {};
+  try { sr = JSON.parse(seg.stdout.trim().split("\n").pop()); } catch { sr = {}; }
+  console.log(`  segmented ${sr.sketches || 0} sketches into regions (counts: ${JSON.stringify(sr.region_counts || {})})`);
+}
+
 // ── fabric fill colours (for the paper-doll recolor) ─────────────
 // Every fabric needs ONE representative colour = swatch albedo × material _Color tint
 // (the shader's own math — a plain swatch average is wrong for tinted near-white albedos

@@ -54,11 +54,25 @@ like Black Corduroy, whose albedo is off-white and colour lives in `_Color {0.12
 Computed at build time by `tools/fabric_colors.py` (reads the sibling extract's materials),
 352/352 resolved. Slot fabric tiles use this colour too, so the build view matches the doll.
 
-**Per-panel fabric — data limit:** the 2D sketch is ONE silhouette per component; `panels[]`
-carry only 3D `mannequinMesh` refs, no per-panel 2D mask or fill-seed. So the flat doll can
-only show one colour per component. Per-panel fabric allocation is a 3D-mannequin feature; it
-can still be wired into the **calc numbers** (cost / composition % / area-weighted tags via
-`fabricByVariation`) — that's the meaningful place it changes outcomes (P1).
+**Per-region colouring on the doll (aesthetic) — DONE 2026-09-27.** The 2D sketch is one
+silhouette per component, but the **red seam lines partition it into enclosed sub-regions**
+that we recover ourselves: `tools/segment_regions.py` flood-fills `silhouette − dilated(red
+seams)` (scipy) into regions and **bakes each region's ID into the sketch's unused BLUE
+channel** (idempotent, derived from R/A; runs every build; zero new assets). The doll canvas
+reads blue → fills each region with its assigned fabric colour, and hit-tests clicks:
+**tap a region → pick a fabric for just that region** (`build.regionFabrics[componentId]
+[regionId]`, aesthetic override; base = the slot fabric). Verified: bodice central panel
+merlot + neckline teal over a Burlap base.
+- Region IDs are stable (sorted by centroid top→bottom); overrides cleared when the component
+  changes/clears. Segmentation over-splits a few complex pieces (one 29-region outlier) —
+  fine for colouring; not panel-exact.
+
+**Per-panel CALC — separate next task (not started).** The `zones` bitmask (1=Front/2=Back/
+4=Left/8=Right, higher bits = extra bands) + per-panel 3D `area` in `fabricByVariation[].panels[]`
+let us wire per-panel fabric into cost / composition % / area-weighted tags exactly (incl. back
+panels with no 2D region). That's the meaningful place per-panel changes outcomes — do it next.
+Region↔panel mapping method (segment → classify by `zones` → match by centroid/side) is
+documented; the colouring above does NOT depend on it.
 
 ## Known issues / warnings
 - **ColorTypeRequirement / FabricTypeRequirement allowed-lists are not in the extract** — they
