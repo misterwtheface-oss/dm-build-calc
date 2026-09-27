@@ -130,9 +130,17 @@ const amLook = (...keys) => { for (const k of keys) if (assetMap[k]) return asse
 // ── transforms ───────────────────────────────────────────────────
 const SLOT_CONTRIB = { bodice: 0.35, skirt: 0.40, sleeve: 0.15, collar: 0.10 };
 
-// COMPONENTS (all 174 — every garment part is obtainable via patterns)
+// COMPONENTS — every finished garment part is obtainable via patterns, BUT the game
+// ships 19 stub rows whose own ScriptableObject declares null art: icon/sketchedSprite/
+// mannequinMesh all {fileID: 0}. They carry authored additiveTags but no art, no mesh
+// (fabricArea 0), and are wired into NO progression path (0/19 referenced) — i.e. cut/
+// unfinished content, the same class of gap as the -1 fabrics/accessories. We detect
+// them by "no renderable art" and exclude them so they don't ship as blank, unbuildable
+// picker tiles. (This is why _dm_extract asset_map_404 lists them; the extraction is
+// correct — the source data is the stub.)
 const rawComp = readJSON("garment_components.json");
-const components = rawComp.map((c) => {
+const stubComponents = [];
+const componentsAll = rawComp.map((c) => {
   const label = `component ${c.kind}:${c.name}`;
   const am = amLook(`${c.kind}:${c.name}`, `${c.kind}:${c.prettyName}`);
   const icon = am ? shipAsset(am.icon, SIZE.compIcon) : null;
@@ -149,6 +157,11 @@ const components = rawComp.map((c) => {
     fabricArea: c.fabricArea ?? 0,
     panelCount: c.panelCount ?? 0,
   };
+});
+const components = componentsAll.filter((c) => {
+  const isStub = !c.icon && !c.sketches.length; // null art in the source = cut/unfinished
+  if (isStub) stubComponents.push(`${c.kind}:${c.name}`);
+  return !isStub;
 });
 
 // FABRICS (obtainable only)
@@ -290,6 +303,7 @@ for (const b of components.filter((c) => c.kind === "bodice")) {
 console.log(`── Data hygiene report ──────────`);
 console.log(`✓ ${components.length} components, ${fabrics.length} fabrics, ${accessories.length} accessories, ${quests.length} quests, ${characters.length} characters, ${TAGS.length} tags`);
 console.log(`  compat: ${collars.length} collars, ${skirts.length} skirts, ${sleeves.length} sleeves`);
+if (stubComponents.length) console.log(`  excluded ${stubComponents.length} stub components (null art/mesh in source — cut content): ${stubComponents.join(", ")}`);
 if (errors.length) { console.log(`✗ ${errors.length} error(s):`); errors.forEach((e) => console.log(`    ${e}`)); }
 if (warnings.length) { console.log(`⚠ ${warnings.length} warning(s):`); warnings.slice(0, 40).forEach((w) => console.log(`    ${w}`)); if (warnings.length > 40) console.log(`    …and ${warnings.length - 40} more`); }
 console.log("─".repeat(34));

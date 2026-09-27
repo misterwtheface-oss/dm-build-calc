@@ -21,6 +21,22 @@ guardrails). Soft-atelier palette. Deployed to GitHub Pages.
 - [ ] Prestige/relationship unlock timeline + campaign spine browser.
 - [ ] Save/load/share builds; collection tracking.
 
+## Root-cause: missing assets (investigated 2026-09-27)
+All 178 missing-asset objects are **cut/unfinished content in the game's own
+ScriptableObjects**, not an extraction failure:
+- **85 fabrics** = WIP rows (`prestigeUnlockLevel == -1`), **74 accessories** = art-less
+  rows — both already filtered out by the `obtainable` flag.
+- **19 components** (7 bodice / 9 skirt / 3 sleeve) declare **null art in source**
+  (`icon`/`sketchedSprite`/`mannequinMesh` all `{fileID: 0}`), carry `additiveTags` but no
+  mesh (`fabricArea 0`), and are wired into **no** progression path (100% correlation:
+  every referenced component has art; every image-less one is unreferenced). These had **no
+  `obtainable`-style flag**, so they were shipping as blank, unbuildable picker tiles.
+  → **Fixed:** `build-data.mjs` now excludes components with no renderable art (155 ship,
+  19 excluded, logged in the hygiene report). Result: **0 image-less objects** in `data.js`.
+- Note: `_dm_extract/DATASET.md` claims the 19 "have a `sketches[]` visual instead" — that
+  is **incorrect** (they have neither icon nor sketch nor mesh). Correct the extract doc if
+  revisited.
+
 ## Known issues / warnings
 - **ColorTypeRequirement / FabricTypeRequirement allowed-lists are not in the extract** — they
   carry only `type`, so the checker treats them as always-pass (code says empty=pass). Flagged
