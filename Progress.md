@@ -64,8 +64,14 @@ reads blue → fills each region with its assigned fabric colour, and hit-tests 
 [regionId]`, aesthetic override; base = the slot fabric). Verified: bodice central panel
 merlot + neckline teal over a Burlap base.
 - Region IDs are stable (sorted by centroid top→bottom); overrides cleared when the component
-  changes/clears. Segmentation over-splits a few complex pieces (one 29-region outlier) —
-  fine for colouring; not panel-exact.
+  changes/clears.
+- **Segmentation merge pass (improved 2026-09-27):** decorative pleat/gather lines used to
+  fragment tiers (Ruffle Skirt → 29 regions). Added a merge step — absorb the smallest region
+  into its best SAME-HORIZONTAL-BAND neighbour (max y-overlap, tie-broken by shared border),
+  capped at **≤8 regions, min 5% area each**. Turns ruffle/tier fragments into clean horizontal
+  **tiers** while leaving distinct panels (bodice L/R, jacket) intact. Region-count distribution
+  now tops out at 8 (was 2–29); verified in-app (ruffle skirt = colourable tiers). Params in
+  `tools/segment_regions.py`: SEAM_T 60, SIL_T 40, DILATE 2, SPECK 0.3%, MIN_FRAC 5%, MAX 8.
 
 **Per-panel CALC — separate next task (not started).** The `zones` bitmask (1=Front/2=Back/
 4=Left/8=Right, higher bits = extra bands) + per-panel 3D `area` in `fabricByVariation[].panels[]`
