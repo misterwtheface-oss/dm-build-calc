@@ -72,6 +72,9 @@ merlot + neckline teal over a Burlap base.
   **tiers** while leaving distinct panels (bodice L/R, jacket) intact. Region-count distribution
   now tops out at 8 (was 2–29); verified in-app (ruffle skirt = colourable tiers). Params in
   `tools/segment_regions.py`: SEAM_T 60, SIL_T 40, DILATE 2, SPECK 0.3%, MIN_FRAC 5%, MAX 8.
+- **DESIGN DECISION (user, 2026-09-27):** left/right splits within a tier are VALID — they are
+  real seams in the artwork, not a segmentation bug. Do NOT add a symmetric/mirror L↔R merge
+  rule; keep these as separate colourable regions.
 
 **Per-panel CALC — separate next task (not started).** The `zones` bitmask (1=Front/2=Back/
 4=Left/8=Right, higher bits = extra bands) + per-panel 3D `area` in `fabricByVariation[].panels[]`
