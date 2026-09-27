@@ -37,6 +37,29 @@ ScriptableObjects**, not an extraction failure:
   is **incorrect** (they have neither icon nor sketch nor mesh). Correct the extract doc if
   revisited.
 
+## Paper-doll rendering: root cause + fix (2026-09-27)
+The doll was rendering garments bright green. Root cause: the sketch PNGs are **channel-
+packed composite masks, not display images** — `alpha` = fill silhouette, `green` = fill
+shading, **`red` = ink line-art/seams**, blue unused (verified: G tracks alpha 96–100%, red
+lives in the transparent regions, blue ≈0 across all part types). In-game a shader fills the
+silhouette with the chosen fabric colour + inks the red seams (the `Blit_SketchbookComposite`
+shader AssetRipper stubbed). Rendered raw in an `<img>` they read as green fill + orange seams.
+→ **Fixed:** the doll is now a `<canvas>` that replicates the composite — fills each part's
+silhouette with its slot's fabric colour, darkened along the red seam lines (`composeDoll` /
+`recolorLayer` in app.js). Fabric selection now visibly recolours the doll.
+
+**Fabric colours:** every fabric now carries a `color` = swatch albedo × material `_Color`
+tint (the shader's own math — a plain swatch average was wrong for tinted near-white albedos
+like Black Corduroy, whose albedo is off-white and colour lives in `_Color {0.12,0.13,0.16}`).
+Computed at build time by `tools/fabric_colors.py` (reads the sibling extract's materials),
+352/352 resolved. Slot fabric tiles use this colour too, so the build view matches the doll.
+
+**Per-panel fabric — data limit:** the 2D sketch is ONE silhouette per component; `panels[]`
+carry only 3D `mannequinMesh` refs, no per-panel 2D mask or fill-seed. So the flat doll can
+only show one colour per component. Per-panel fabric allocation is a 3D-mannequin feature; it
+can still be wired into the **calc numbers** (cost / composition % / area-weighted tags via
+`fabricByVariation`) — that's the meaningful place it changes outcomes (P1).
+
 ## Known issues / warnings
 - **ColorTypeRequirement / FabricTypeRequirement allowed-lists are not in the extract** — they
   carry only `type`, so the checker treats them as always-pass (code says empty=pass). Flagged

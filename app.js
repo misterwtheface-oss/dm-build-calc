@@ -244,14 +244,79 @@
   // ═══════════════════════════════════════════════════════════════
   //  BUILD VIEW (build-first home)
   // ═══════════════════════════════════════════════════════════════
-  function paperDollHTML(b) {
+  // The sketch PNGs are channel-packed composite masks, NOT display images:
+  //   alpha = fill silhouette · green = fill shading · RED = ink line-art/seams · blue unused.
+  // In-game a shader fills the silhouette with the chosen fabric colour + inks the red lines.
+  // Rendered raw they read as green — so we replicate the composite on a <canvas>: fill each
+  // part's silhouette with its slot's fabric colour, darkened along the red seam lines.
+  // (Per-COMPONENT colour only — the 2D sketch is one silhouette per part; per-panel colour is
+  //  a 3D-mannequin feature with no 2D mask in the data.)
+  const INK = [58, 46, 42];              // espresso seam ink
+  const NO_FABRIC = "#e7dac4";           // linen placeholder when a part has no fabric yet
+  const _imgCache = new Map();
+  function loadImg(src) {
+    if (_imgCache.has(src)) return _imgCache.get(src);
+    const p = new Promise((res) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => res(null);
+      im.src = src;
+    });
+    _imgCache.set(src, p);
+    return p;
+  }
+  function hexRgb(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+    if (!m) return [200, 190, 175];
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  // Recolor one sketch layer into an offscreen canvas: silhouette→fabric colour, seams→ink.
+  function recolorLayer(img, fillHex) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const x = c.getContext("2d"); x.drawImage(img, 0, 0);
+    const d = x.getImageData(0, 0, w, h), p = d.data;
+    const [fr, fg, fb] = hexRgb(fillHex);
+    for (let i = 0; i < p.length; i += 4) {
+      const R = p[i], G = p[i + 1], A = p[i + 3];
+      const line = R / 255;                 // red channel = ink line strength
+      const sil = A / 255;                  // alpha = fill silhouette
+      const cover = Math.max(sil, line);    // show fill OR line (outline sits just off the alpha edge)
+      if (cover < 0.02) { p[i + 3] = 0; continue; }
+      const shade = 0.80 + 0.20 * (G / 255); // green = subtle fill shading for a little form
+      p[i]     = (fr * shade) * (1 - line) + INK[0] * line;
+      p[i + 1] = (fg * shade) * (1 - line) + INK[1] * line;
+      p[i + 2] = (fb * shade) * (1 - line) + INK[2] * line;
+      p[i + 3] = Math.round(cover * 255);
+    }
+    x.putImageData(d, 0, 0);
+    return c;
+  }
+  function composeDoll(b) {
+    const canvas = document.getElementById("doll-canvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
     const layers = DOLL_ORDER.map((s) => {
       const c = b.components[s] && compById.get(b.components[s]);
       const sk = c && c.sketches && c.sketches[0];
-      return sk ? `<img class="doll-layer" src="${esc(sk)}" alt="" onerror="this.style.visibility='hidden'">` : "";
-    }).join("");
+      if (!sk) return null;
+      const f = b.fabrics[s] && fabById.get(b.fabrics[s]);
+      return { src: sk, color: f ? (f.color || NO_FABRIC) : NO_FABRIC };
+    }).filter(Boolean);
+    const token = (composeDoll._t = (composeDoll._t || 0) + 1); // guard against stale async paints
+    Promise.all(layers.map((l) => loadImg(l.src))).then((imgs) => {
+      if (token !== composeDoll._t) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      imgs.forEach((img, i) => { if (img) ctx.drawImage(recolorLayer(img, layers[i].color), 0, 0, canvas.width, canvas.height); });
+    });
+  }
+  function paperDollHTML(b) {
     const empty = !presentSlots(b).length;
-    return `<div class="doll">${layers}${empty ? `<div class="doll-empty">Pick garment parts to preview the dress</div>` : ""}</div>`;
+    return `<div class="doll">
+      <canvas id="doll-canvas" width="700" height="700"></canvas>
+      ${empty ? `<div class="doll-empty">Pick garment parts to preview the dress</div>` : ""}
+    </div>`;
   }
 
   function slotRowHTML(b, s) {
@@ -259,7 +324,7 @@
     const f = b.fabrics[s] && fabById.get(b.fabrics[s]);
     const fabTile = c
       ? `<div class="tile fab-tile ${f ? "filled" : ""}" data-action="open-fabric" data-slot="${s}" title="${f ? esc(f.name) : "Choose fabric"}">
-           ${f ? (f.swatch ? imgTag(f.swatch) : `<span class="swatch-chip" style="background:${esc(f.swatchColor || "#ccc")}"></span>`) : `<span class="tile-empty">fabric</span>`}
+           ${f ? `<span class="swatch-chip" style="background:${esc(f.color || "#ccc")}"></span>` : `<span class="tile-empty">fabric</span>`}
          </div>`
       : `<div class="tile fab-tile disabled" title="Choose a ${s} first"><span class="tile-empty">fabric</span></div>`;
     return `<div class="slot-row">
@@ -456,6 +521,8 @@
 
     const newMain = app.querySelector(".planning-main");
     if (newMain) newMain.scrollTop = prevScroll;
+
+    composeDoll(b); // paint the fabric-coloured paper doll onto the canvas
   }
 
   // ═══════════════════════════════════════════════════════════════

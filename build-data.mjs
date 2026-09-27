@@ -248,6 +248,29 @@ if (assetReport.missing) warnings.push(`${assetReport.missing} manifest source(s
 if (assetReport.failed) errors.push(`${assetReport.failed} asset(s) failed to process`);
 fs.rmSync(manifestPath, { force: true });
 
+// ── fabric fill colours (for the paper-doll recolor) ─────────────
+// Every fabric needs ONE representative colour = swatch albedo × material _Color tint
+// (the shader's own math — a plain swatch average is wrong for tinted near-white albedos
+// like Black Corduroy). swatchColor hex wins if the extract already gave one. The doll
+// fills each garment part's silhouette with this colour, so fabric choice shows visually.
+{
+  const need = fabrics.filter((f) => !f.swatchColor).map((f) => ({ name: f.id.replace(/^fabric:/, ""), swatch: f.swatch || null }));
+  let colorMap = {};
+  if (need.length) {
+    const cm = path.join("assets", "_swatch_manifest.json");
+    fs.writeFileSync(cm, JSON.stringify(need));
+    const cp = spawnSync("python", ["tools/fabric_colors.py", EXTRACT, cm], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    fs.rmSync(cm, { force: true });
+    if (cp.status !== 0) { console.error("fabric_colors.py failed:\n" + (cp.stderr || cp.stdout)); process.exit(1); }
+    try { colorMap = JSON.parse(cp.stdout.trim().split("\n").pop()); } catch { colorMap = {}; }
+  }
+  for (const f of fabrics) {
+    f.color = f.swatchColor || colorMap[f.id.replace(/^fabric:/, "")] || null;
+    if (!f.color) warnings.push(`fabric ${f.id}: no fill colour resolved`);
+  }
+  console.log(`  fabric fill colours: ${fabrics.filter((f) => f.color).length}/${fabrics.length} resolved (${need.length} via albedo×tint)`);
+}
+
 // ── guardrails ───────────────────────────────────────────────────
 // 1. duplicate ids across each collection
 function checkDupes(list, label) {
