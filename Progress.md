@@ -48,6 +48,13 @@ shader AssetRipper stubbed). Rendered raw in an `<img>` they read as green fill 
 silhouette with its slot's fabric colour, darkened along the red seam lines (`composeDoll` /
 `recolorLayer` in app.js). Fabric selection now visibly recolours the doll.
 
+**Crisp doll edges (2026-09-27):** the outer silhouette used to render a fuzzy dark halo because
+the red ink outline sits mostly in the transparent pixels *beyond* the alpha edge and
+`cover=max(sil,line)` painted that fading halo. Fixed in `recolorLayer`: output alpha = a
+*sharpened* silhouette (`(sil−0.35)/0.30`, ~1px transition, no wide fringe), and ink is **gated to
+inside the silhouette** (`sil>0.45`) so the halo is dropped. Internal seams (high alpha) are
+unaffected. Pure per-pixel, no neighbour ops.
+
 **Fabric colours:** every fabric now carries a `color` = swatch albedo × material `_Color`
 tint (the shader's own math — a plain swatch average was wrong for tinted near-white albedos
 like Black Corduroy, whose albedo is off-white and colour lives in `_Color {0.12,0.13,0.16}`).

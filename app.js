@@ -298,8 +298,14 @@
     for (let id = 0; id < 256; id++) lut[id] = palette[id] ? hexRgb(palette[id]) : baseRgb;
     for (let i = 0; i < srcData.length; i += 4) {
       const R = srcData[i], G = srcData[i + 1], region = srcData[i + 2], A = srcData[i + 3];
-      const line = R / 255, sil = A / 255, cover = Math.max(sil, line);
-      if (cover < 0.02) { p[i + 3] = 0; continue; }
+      const sil = A / 255;
+      // Crisp the OUTER edge: sharpen the anti-aliased silhouette to a tight ~1px transition
+      // (drops the wide soft fringe) instead of letting the red ink halo bleed past the shape.
+      const cover = sil <= 0.35 ? 0 : sil >= 0.65 ? 1 : (sil - 0.35) / 0.30;
+      if (cover < 0.01) { p[i + 3] = 0; continue; }
+      // Ink only INSIDE the silhouette — the red outline mostly sits in transparent pixels, so
+      // gating it here removes the fuzzy outer halo while keeping internal seams crisp.
+      const line = sil > 0.45 ? R / 255 : 0;
       const col = lut[region], shade = 0.80 + 0.20 * (G / 255);
       p[i]     = (col[0] * shade) * (1 - line) + INK[0] * line;
       p[i + 1] = (col[1] * shade) * (1 - line) + INK[1] * line;
