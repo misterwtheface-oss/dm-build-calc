@@ -32,7 +32,9 @@ const STRICT = process.argv.includes("--strict");
 const FORCE = process.argv.includes("--force");
 // asset target sizes (longest side, px). Line-art sketches drive the paper doll so
 // they stay larger; everything else is a small tile.
-const SIZE = { swatch: 160, accIcon: 128, compIcon: 128, sketch: 700, portrait: 320 };
+// Masks (sketches) ship VERBATIM (copy, no resample) to preserve the flat (R,G) region
+// values + thin transparent gaps. Swatches are tinted+downscaled by tools/fabric_swatches.py.
+const SIZE = { swatch: 256, accIcon: 128, compIcon: 128, portrait: 320 };
 // -------------
 
 const errors = [];
@@ -115,14 +117,14 @@ const ship = [];                 // {src, dst, max}
 const shipSeen = new Set();
 // Register a source asset (path relative to the extract's assets/) to be copied +
 // resized, returning the runtime path the SPA will use (or null if source missing).
-function shipAsset(relPath, max) {
+function shipAsset(relPath, max, opts) {
   if (!relPath) return null;
   const rel = relPath.replace(/\\/g, "/");
   const src = path.join(EXTRACT_ASSETS, rel);
   const dst = path.join("assets", rel);
   const runtime = "assets/" + rel;
   if (!fs.existsSync(src)) { warnings.push(`asset missing in extract: ${rel} (image dropped, no 404 shipped)`); return null; }
-  if (!shipSeen.has(rel)) { shipSeen.add(rel); ship.push({ src, dst, max }); }
+  if (!shipSeen.has(rel)) { shipSeen.add(rel); ship.push({ src, dst, max, copy: !!(opts && opts.copy) }); }
   return runtime;
 }
 const amLook = (...keys) => { for (const k of keys) if (assetMap[k]) return assetMap[k]; return null; };
@@ -144,7 +146,7 @@ const componentsAll = rawComp.map((c) => {
   const label = `component ${c.kind}:${c.name}`;
   const am = amLook(`${c.kind}:${c.name}`, `${c.kind}:${c.prettyName}`);
   const icon = am ? shipAsset(am.icon, SIZE.compIcon) : null;
-  const sketches = am && am.sketches ? am.sketches.map((s) => shipAsset(s, SIZE.sketch)).filter(Boolean) : [];
+  const sketches = am && am.sketches ? am.sketches.map((s) => shipAsset(s, 0, { copy: true })).filter(Boolean) : []; // masks: verbatim
   return {
     id: `${c.kind}:${c.name}`,
     name: fixText(c.prettyName || c.name),
@@ -166,14 +168,18 @@ const components = componentsAll.filter((c) => {
 
 // FABRICS (obtainable only)
 const rawFab = readJSON("fabrics.json");
+// Swatches are tinted + shipped by tools/fabric_swatches.py (below), not process_assets —
+// so `swatch`/`swatchRel` here just record the intended paths; `color` is filled in after.
 const fabrics = rawFab.filter((f) => f.obtainable).map((f) => {
   const am = amLook(`Fabric:${f.name}`);
-  const swatch = am ? shipAsset(am.swatch, SIZE.swatch) : null;
-  const swatchColor = am ? (am.swatchColor || null) : null;
+  const swatchRel = am && am.swatch ? am.swatch.replace(/\\/g, "/") : null;   // extract-relative
   return {
     id: `fabric:${f.name}`,
     name: fixText(f.prettyName || f.name),
-    swatch, swatchColor,
+    swatch: swatchRel ? "assets/" + swatchRel : null,   // shipped path (populated by fabric_swatches)
+    swatchRel,
+    swatchColor: am ? (am.swatchColor || null) : null,
+    tileScale: am && am.tileScale ? am.tileScale : [6, 6],   // pattern-fill tile density
     fabricType: fixText(f.fabricType),
     colors: (f.colors || []).map(fixText),
     cost: Number(f.cost) || 0,
@@ -248,39 +254,28 @@ if (assetReport.missing) warnings.push(`${assetReport.missing} manifest source(s
 if (assetReport.failed) errors.push(`${assetReport.failed} asset(s) failed to process`);
 fs.rmSync(manifestPath, { force: true });
 
-// ── segment component sketches into regions (blue-channel IDs) ────
-// Bake a per-region ID into each sketch's unused blue channel so the doll can colour
-// each garment sub-region independently and hit-test clicks (see tools/segment_regions.py).
-// Idempotent (derives IDs from R/A), so it runs every build.
+// ── fabric swatches: tint by material _Color, ship tileable PNG + solid fallback ──
+// The doll pattern-fills regions with the fabric's swatch; tinting bakes the true colour
+// into the shipped swatch (raw albedo is near-white for dyed cloth like Black Corduroy).
+// Also yields a representative solid `color` (for solid-dyed fabrics + non-pattern fallback).
 {
-  const seg = spawnSync("python", ["tools/segment_regions.py", path.join("assets", "icons")], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (seg.status !== 0) { console.error("segment_regions.py failed:\n" + (seg.stderr || seg.stdout)); process.exit(1); }
-  let sr = {};
-  try { sr = JSON.parse(seg.stdout.trim().split("\n").pop()); } catch { sr = {}; }
-  console.log(`  segmented ${sr.sketches || 0} sketches into regions (counts: ${JSON.stringify(sr.region_counts || {})})`);
-}
-
-// ── fabric fill colours (for the paper-doll recolor) ─────────────
-// Every fabric needs ONE representative colour = swatch albedo × material _Color tint
-// (the shader's own math — a plain swatch average is wrong for tinted near-white albedos
-// like Black Corduroy). swatchColor hex wins if the extract already gave one. The doll
-// fills each garment part's silhouette with this colour, so fabric choice shows visually.
-{
-  const need = fabrics.filter((f) => !f.swatchColor).map((f) => ({ name: f.id.replace(/^fabric:/, ""), swatch: f.swatch || null }));
-  let colorMap = {};
-  if (need.length) {
-    const cm = path.join("assets", "_swatch_manifest.json");
-    fs.writeFileSync(cm, JSON.stringify(need));
-    const cp = spawnSync("python", ["tools/fabric_colors.py", EXTRACT, cm], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    fs.rmSync(cm, { force: true });
-    if (cp.status !== 0) { console.error("fabric_colors.py failed:\n" + (cp.stderr || cp.stdout)); process.exit(1); }
-    try { colorMap = JSON.parse(cp.stdout.trim().split("\n").pop()); } catch { colorMap = {}; }
-  }
+  const manifest = fabrics.map((f) => ({ name: f.id.replace(/^fabric:/, ""), swatchRel: f.swatchRel || null, dst: f.swatch || null }));
+  const mf = path.join("assets", "_swatch_manifest.json");
+  fs.writeFileSync(mf, JSON.stringify(manifest));
+  const cp = spawnSync("python", ["tools/fabric_swatches.py", EXTRACT, mf, String(SIZE.swatch)], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+  fs.rmSync(mf, { force: true });
+  if (cp.status !== 0) { console.error("fabric_swatches.py failed:\n" + (cp.stderr || cp.stdout)); process.exit(1); }
+  let res = {};
+  try { res = JSON.parse(cp.stdout.trim().split("\n").pop()); } catch { res = {}; }
+  let patterned = 0;
   for (const f of fabrics) {
-    f.color = f.swatchColor || colorMap[f.id.replace(/^fabric:/, "")] || null;
-    if (!f.color) warnings.push(`fabric ${f.id}: no fill colour resolved`);
+    const r = res[f.id.replace(/^fabric:/, "")] || {};
+    if (!r.hasSwatch) f.swatch = null;          // no tileable texture → solid only
+    else patterned++;
+    f.color = f.swatchColor || r.color || "#cccccc";
+    delete f.swatchRel;                          // build-only field, don't ship
   }
-  console.log(`  fabric fill colours: ${fabrics.filter((f) => f.color).length}/${fabrics.length} resolved (${need.length} via albedo×tint)`);
+  console.log(`  fabric swatches: ${patterned} tinted patterns shipped, ${fabrics.length - patterned} solid-colour; colours 100%`);
 }
 
 // ── guardrails ───────────────────────────────────────────────────

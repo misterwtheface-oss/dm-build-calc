@@ -248,111 +248,144 @@
   // ═══════════════════════════════════════════════════════════════
   //  BUILD VIEW (build-first home)
   // ═══════════════════════════════════════════════════════════════
-  // The sketch PNGs are channel-packed composite masks, NOT display images:
-  //   alpha = fill silhouette · green = fill shading · RED = ink line-art/seams · blue unused.
-  // In-game a shader fills the silhouette with the chosen fabric colour + inks the red lines.
-  // Rendered raw they read as green — so we replicate the composite on a <canvas>: fill each
-  // part's silhouette with its slot's fabric colour, darkened along the red seam lines.
-  // (Per-COMPONENT colour only — the 2D sketch is one silhouette per part; per-panel colour is
-  //  a 3D-mannequin feature with no 2D mask in the data.)
-  const INK = [58, 46, 42];              // espresso seam ink
-  const NO_FABRIC = "#e7dac4";           // linen placeholder when a part has no fabric yet
+  // Region-mask + pattern fill (ported from _dm_extract/SKETCH_COLORING.md + code/sketch_fill.js).
+  // The sketch PNG is a REGION MASK: each region = pixels whose (R,G) quantize to the same
+  // {0,204,255} band (B≈0), regions split by transparent gaps. We fill each region with its
+  // assigned fabric — tiled swatch PATTERN (or solid colour) clipped to the region — draw the
+  // region-boundary outlines dark, and composite parts skirt→bodice→sleeve→collar. Regions are
+  // artist-authored (≤9/part): L/R sharing a value fill together, differing values fill
+  // independently (both intentional). Cosmetic only — scoring uses per-panel fabric (separate).
+  const BANDS = [0, 204, 255];
+  const PAPER = [236, 232, 221];        // uncoloured region tone
+  const OUTLINE = [58, 46, 42];         // region-boundary pencil
+  const nearestBand = (v) => (v < 102 ? 0 : v < 230 ? 204 : 255);
+  const regionKeyOf = (r, g) => nearestBand(r) * 1000 + nearestBand(g);
+  const regionKeyStr = (key) => `${Math.floor(key / 1000)},${key % 1000}`; // "R,G"
+
   const _imgCache = new Map();
   function loadImg(src) {
     if (_imgCache.has(src)) return _imgCache.get(src);
     const p = new Promise((res) => {
       const im = new Image();
-      im.onload = () => res(im);
-      im.onerror = () => res(null);
-      im.src = src;
+      im.onload = () => res(im); im.onerror = () => res(null); im.src = src;
     });
-    _imgCache.set(src, p);
-    return p;
+    _imgCache.set(src, p); return p;
   }
   function hexRgb(hex) {
     const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
     if (!m) return [200, 190, 175];
-    const n = parseInt(m[1], 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    const n = parseInt(m[1], 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
-  // Cache the decoded pixels of each sketch (for recolor + click hit-testing).
-  const _pxCache = new Map();
-  function sketchPixels(img, src) {
-    if (_pxCache.has(src)) return _pxCache.get(src);
+  // Per-pixel region-key map + dims for a mask (cached by src).
+  const _keyCache = new Map();
+  function keyMap(img, src) {
+    if (_keyCache.has(src)) return _keyCache.get(src);
     const w = img.naturalWidth, h = img.naturalHeight;
     const c = document.createElement("canvas"); c.width = w; c.height = h;
-    const x = c.getContext("2d"); x.drawImage(img, 0, 0);
-    const rec = { w, h, data: x.getImageData(0, 0, w, h).data };
-    _pxCache.set(src, rec);
-    return rec;
+    c.getContext("2d").drawImage(img, 0, 0);
+    const d = c.getContext("2d").getImageData(0, 0, w, h).data;
+    const key = new Int32Array(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) key[p] = d[i + 3] > 32 ? regionKeyOf(d[i], d[i + 1]) : -1;
+    const rec = { key, w, h }; _keyCache.set(src, rec); return rec;
   }
-  // Recolor one sketch layer: each pixel's BLUE channel is its region id; fill with that
-  // region's colour (palette[id]) else the base colour, then ink the red seams.
-  function recolorLayer(img, src, base, palette) {
-    const { w, h, data: srcData } = sketchPixels(img, src);
-    const c = document.createElement("canvas"); c.width = w; c.height = h;
-    const x = c.getContext("2d");
-    const out = x.createImageData(w, h), p = out.data;
-    // build a fast id→[r,g,b] lookup (region ids are small ints)
-    const baseRgb = hexRgb(base), lut = [];
-    for (let id = 0; id < 256; id++) lut[id] = palette[id] ? hexRgb(palette[id]) : baseRgb;
-    for (let i = 0; i < srcData.length; i += 4) {
-      const R = srcData[i], G = srcData[i + 1], region = srcData[i + 2], A = srcData[i + 3];
-      const sil = A / 255;
-      // Crisp the OUTER edge: sharpen the anti-aliased silhouette to a tight ~1px transition
-      // (drops the wide soft fringe) instead of letting the red ink halo bleed past the shape.
-      const cover = sil <= 0.35 ? 0 : sil >= 0.65 ? 1 : (sil - 0.35) / 0.30;
-      if (cover < 0.01) { p[i + 3] = 0; continue; }
-      // Ink only INSIDE the silhouette — the red outline mostly sits in transparent pixels, so
-      // gating it here removes the fuzzy outer halo while keeping internal seams crisp.
-      const line = sil > 0.45 ? R / 255 : 0;
-      const col = lut[region], shade = 0.80 + 0.20 * (G / 255);
-      p[i]     = (col[0] * shade) * (1 - line) + INK[0] * line;
-      p[i + 1] = (col[1] * shade) * (1 - line) + INK[1] * line;
-      p[i + 2] = (col[2] * shade) * (1 - line) + INK[2] * line;
-      p[i + 3] = Math.round(cover * 255);
+  // Resolve a fabric → {type:'pattern', img, tileScale} | {type:'solid', rgb}.
+  async function fabricVisual(fabId) {
+    const f = fabById.get(fabId); if (!f) return null;
+    if (f.swatch) { const img = await loadImg(f.swatch); if (img) return { type: "pattern", img, tileScale: f.tileScale || [6, 6] }; }
+    return { type: "solid", rgb: hexRgb(f.color || f.swatchColor || "#ccc") };
+  }
+  // Render one part layer: paper base, then each assigned region tiled with its fabric, outlines on top.
+  async function renderPart(comp, base, overrides) {
+    const src = comp.sketches[0];
+    const img = await loadImg(src); if (!img) return null;
+    const { key, w, h } = keyMap(img, src);
+    const out = document.createElement("canvas"); out.width = w; out.height = h;
+    const octx = out.getContext("2d");
+    const outImg = octx.createImageData(w, h), od = outImg.data;
+    const regions = new Map();
+    for (let p = 0, y = 0; y < h; y++) for (let x = 0; x < w; x++, p++) {
+      const k = key[p]; if (k < 0) continue;
+      od[p * 4] = PAPER[0]; od[p * 4 + 1] = PAPER[1]; od[p * 4 + 2] = PAPER[2]; od[p * 4 + 3] = 255;
+      let r = regions.get(k);
+      if (!r) { r = { minx: x, miny: y, maxx: x, maxy: y, pts: [] }; regions.set(k, r); }
+      if (x < r.minx) r.minx = x; if (y < r.miny) r.miny = y; if (x > r.maxx) r.maxx = x; if (y > r.maxy) r.maxy = y;
+      r.pts.push(p);
     }
-    x.putImageData(out, 0, 0);
-    return c;
-  }
-  // Which colour fills each region of a component: its override fabric, else the slot fabric.
-  function regionPalette(b, slot, comp) {
-    const pal = {};
-    const overrides = b.regionFabrics[comp.id] || {};
-    for (const [rid, fid] of Object.entries(overrides)) {
-      const f = fabById.get(fid); if (f && f.color) pal[Number(rid)] = f.color;
+    octx.putImageData(outImg, 0, 0);
+    for (const [k, r] of regions) {
+      const fabId = overrides[regionKeyStr(k)] || base;
+      if (!fabId) continue;                          // uncoloured → paper stays
+      const vis = await fabricVisual(fabId); if (!vis) continue;
+      const bw = r.maxx - r.minx + 1, bh = r.maxy - r.miny + 1;
+      const tile = document.createElement("canvas"); tile.width = bw; tile.height = bh;
+      const tcx = tile.getContext("2d");
+      if (vis.type === "pattern") {
+        const reps = 6 * Math.sqrt((vis.tileScale[0] + vis.tileScale[1]) / 2 / 6);
+        const tpx = Math.max(6, Math.floor(Math.min(bw, bh) / Math.max(1e-6, reps)));
+        const pc = document.createElement("canvas"); pc.width = tpx; pc.height = tpx;
+        pc.getContext("2d").drawImage(vis.img, 0, 0, tpx, tpx);
+        tcx.fillStyle = tcx.createPattern(pc, "repeat"); tcx.fillRect(0, 0, bw, bh);
+      } else {
+        tcx.fillStyle = `rgb(${vis.rgb.join(",")})`; tcx.fillRect(0, 0, bw, bh);
+      }
+      // clip the tile to the region shape
+      const mimg = tcx.createImageData(bw, bh), md = mimg.data;
+      for (const p of r.pts) { const x = p % w - r.minx, y = ((p / w) | 0) - r.miny; md[(y * bw + x) * 4 + 3] = 255; }
+      const mcv = document.createElement("canvas"); mcv.width = bw; mcv.height = bh;
+      mcv.getContext("2d").putImageData(mimg, 0, 0);
+      tcx.globalCompositeOperation = "destination-in"; tcx.drawImage(mcv, 0, 0);
+      tcx.globalCompositeOperation = "source-over";
+      octx.drawImage(tile, r.minx, r.miny);
     }
-    return pal;
+    // crisp region-boundary outlines (also gives a clean outer edge)
+    const ol = octx.getImageData(0, 0, w, h), ld = ol.data;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = y * w + x; if (key[p] < 0) continue;
+      if (key[p - 1] !== key[p] || key[p + 1] !== key[p] || key[p - w] !== key[p] || key[p + w] !== key[p]) {
+        ld[p * 4] = OUTLINE[0]; ld[p * 4 + 1] = OUTLINE[1]; ld[p * 4 + 2] = OUTLINE[2]; ld[p * 4 + 3] = 255;
+      }
+    }
+    octx.putImageData(ol, 0, 0);
+    return out;
   }
-  function composeDoll(b) {
-    const canvas = document.getElementById("doll-canvas");
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const layers = DOLL_ORDER.map((s) => {
+  // Layer cache — only re-render a part when its component/base/overrides change.
+  const _layerCache = new Map();
+  async function partLayer(comp, base, overrides) {
+    const ck = `${comp.id}|${base || ""}|${JSON.stringify(overrides || {})}`;
+    if (_layerCache.has(ck)) return _layerCache.get(ck);
+    const layer = await renderPart(comp, base, overrides);
+    _layerCache.set(ck, layer);
+    if (_layerCache.size > 48) _layerCache.delete(_layerCache.keys().next().value);
+    return layer;
+  }
+  async function composeDoll(b) {
+    const canvas = document.getElementById("doll-canvas"); if (!canvas) return;
+    const token = (composeDoll._t = (composeDoll._t || 0) + 1);
+    const specs = DOLL_ORDER.map((s) => {
       const c = b.components[s] && compById.get(b.components[s]);
-      const sk = c && c.sketches && c.sketches[0];
-      if (!sk) return null;
-      const f = b.fabrics[s] && fabById.get(b.fabrics[s]);
-      return { src: sk, base: f ? (f.color || NO_FABRIC) : NO_FABRIC, palette: regionPalette(b, s, c) };
+      if (!c || !c.sketches || !c.sketches[0]) return null;
+      return { comp: c, base: b.fabrics[s] || null, overrides: b.regionFabrics[c.id] || {} };
     }).filter(Boolean);
-    const token = (composeDoll._t = (composeDoll._t || 0) + 1); // guard against stale async paints
-    Promise.all(layers.map((l) => loadImg(l.src))).then((imgs) => {
-      if (token !== composeDoll._t) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      imgs.forEach((img, i) => { if (img) ctx.drawImage(recolorLayer(img, layers[i].src, layers[i].base, layers[i].palette), 0, 0, canvas.width, canvas.height); });
-    });
+    const layers = await Promise.all(specs.map((sp) => partLayer(sp.comp, sp.base, sp.overrides)));
+    if (token !== composeDoll._t) return;             // a newer compose superseded this one
+    let W = 0, H = 0;
+    for (const l of layers) if (l) { W = Math.max(W, l.width); H = Math.max(H, l.height); }
+    if (!W) return;
+    canvas.width = W; canvas.height = H;
+    const cx = canvas.getContext("2d"); cx.clearRect(0, 0, W, H);
+    for (const l of layers) if (l) cx.drawImage(l, 0, 0);
   }
-  // Hit-test a doll click → which garment part + region was clicked (topmost layer wins).
-  function dollHitTest(b, nx, ny) {
+  // Hit-test a doll click → {slot, componentId, regionKey:"R,G"} (topmost opaque part wins).
+  async function dollHitTest(b, nx, ny) {
     for (const s of [...DOLL_ORDER].reverse()) {         // front-most first
       const c = b.components[s] && compById.get(b.components[s]);
-      const sk = c && c.sketches && c.sketches[0];
-      if (!sk) continue;
-      const rec = _pxCache.get(sk); if (!rec) continue;   // not painted yet
-      const px = Math.floor(nx * rec.w), py = Math.floor(ny * rec.h);
-      if (px < 0 || py < 0 || px >= rec.w || py >= rec.h) continue;
-      const off = (py * rec.w + px) * 4;
-      if (rec.data[off + 3] > 40) return { slot: s, componentId: c.id, regionId: rec.data[off + 2] };
+      const sk = c && c.sketches && c.sketches[0]; if (!sk) continue;
+      const img = await loadImg(sk); if (!img) continue;
+      const { key, w, h } = keyMap(img, sk);
+      const px = Math.floor(nx * w), py = Math.floor(ny * h);
+      if (px < 0 || py < 0 || px >= w || py >= h) continue;
+      const k = key[py * w + px];
+      if (k >= 0) return { slot: s, componentId: c.id, regionKey: regionKeyStr(k) };
     }
     return null;
   }
@@ -607,7 +640,7 @@
   function overlayTitle() {
     const o = state.ovl;
     if (o.kind === "component") return `Choose ${o.slot}`;
-    if (o.kind === "fabric") return o.regionId != null ? `Region fabric — ${o.slot}` : `Choose fabric — ${o.slot}`;
+    if (o.kind === "fabric") return o.regionKey != null ? `Region fabric — ${o.slot}` : `Choose fabric — ${o.slot}`;
     if (o.kind === "accessory") return `Add accessories`;
     if (o.kind === "quest") return `Choose a quest`;
     return "Choose";
@@ -617,12 +650,12 @@
     opts = opts || {};
     let pending;
     if (kind === "component") pending = state.build.components[slot] || null;
-    else if (kind === "fabric") pending = opts.regionId != null
-      ? ((state.build.regionFabrics[opts.componentId] || {})[opts.regionId] || null)
+    else if (kind === "fabric") pending = opts.regionKey != null
+      ? ((state.build.regionFabrics[opts.componentId] || {})[opts.regionKey] || null)
       : (state.build.fabrics[slot] || null);
     else if (kind === "accessory") pending = state.build.accessories.slice();
     else if (kind === "quest") pending = state.build.quest || null;
-    state.ovl = { kind, slot, pending, search: "", cat: null, regionId: opts.regionId ?? null, componentId: opts.componentId || null };
+    state.ovl = { kind, slot, pending, search: "", cat: null, regionKey: opts.regionKey ?? null, componentId: opts.componentId || null };
 
     const cats = overlayCategories();
     const catBar = cats.length ? `<div class="ovl-cats">
@@ -785,10 +818,10 @@
         if (prev !== o.pending) { state.build.fabrics[o.slot] = null; if (prev) delete state.build.regionFabrics[prev]; } // fabric + region overrides belong to the piece
         if (o.slot === "bodice") pruneIncompatible();
       } else if (o.kind === "fabric") {
-        if (o.regionId != null) {                       // per-region override (doll aesthetics)
+        if (o.regionKey != null) {                      // per-region override (doll aesthetics)
           const rf = state.build.regionFabrics;
           rf[o.componentId] = rf[o.componentId] || {};
-          if (o.pending) rf[o.componentId][o.regionId] = o.pending; else delete rf[o.componentId][o.regionId];
+          if (o.pending) rf[o.componentId][o.regionKey] = o.pending; else delete rf[o.componentId][o.regionKey];
           if (!Object.keys(rf[o.componentId]).length) delete rf[o.componentId];
         } else state.build.fabrics[o.slot] = o.pending;  // the slot's base fabric (drives calc)
       }
@@ -861,8 +894,10 @@
       case "open-quest": openOverlay("quest"); break;
       case "doll-click": {
         const rect = el.getBoundingClientRect();
-        const hit = dollHitTest(state.build, (e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
-        if (hit) openOverlay("fabric", hit.slot, { regionId: hit.regionId, componentId: hit.componentId });
+        const nx = (e.clientX - rect.left) / rect.width, ny = (e.clientY - rect.top) / rect.height;
+        dollHitTest(state.build, nx, ny).then((hit) => {
+          if (hit) openOverlay("fabric", hit.slot, { regionKey: hit.regionKey, componentId: hit.componentId });
+        });
         break;
       }
       case "clear-slot": { const oc = state.build.components[slot]; state.build.components[slot] = null; state.build.fabrics[slot] = null; if (oc) delete state.build.regionFabrics[oc]; if (slot === "bodice") pruneIncompatible(); persist(); renderApp(); break; }

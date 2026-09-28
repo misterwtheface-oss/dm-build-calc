@@ -37,58 +37,44 @@ ScriptableObjects**, not an extraction failure:
   is **incorrect** (they have neither icon nor sketch nor mesh). Correct the extract doc if
   revisited.
 
-## Paper-doll rendering: root cause + fix (2026-09-27)
-The doll was rendering garments bright green. Root cause: the sketch PNGs are **channel-
-packed composite masks, not display images** — `alpha` = fill silhouette, `green` = fill
-shading, **`red` = ink line-art/seams**, blue unused (verified: G tracks alpha 96–100%, red
-lives in the transparent regions, blue ≈0 across all part types). In-game a shader fills the
-silhouette with the chosen fabric colour + inks the red seams (the `Blit_SketchbookComposite`
-shader AssetRipper stubbed). Rendered raw in an `<img>` they read as green fill + orange seams.
-→ **Fixed:** the doll is now a `<canvas>` that replicates the composite — fills each part's
-silhouette with its slot's fabric colour, darkened along the red seam lines (`composeDoll` /
-`recolorLayer` in app.js). Fabric selection now visibly recolours the doll.
+## Paper-doll rendering — region-mask + PATTERN FILL (reworked 2026-09-27)
+**⚠ Supersedes an earlier wrong model.** The handoff `_dm_extract/SKETCH_COLORING.md` (+ the
+drop-in reference `_dm_extract/code/sketch_fill.js`) is ground truth: the sketch PNG is a
+**REGION MASK**, not a channel-packed shading image. Each region = pixels whose **(R,G) quantize
+to the closed palette {0,204,255}²** (≤9 regions/part, B≈0), regions separated by **transparent
+gaps**; the pencil outlines are drawn from those gaps, not baked. My earlier flood-fill /
+blue-channel / merge segmentation was reconstructing regions the wrong way and is **removed**
+(`tools/segment_regions.py` deleted).
 
-**Crisp doll edges (2026-09-27):** the outer silhouette used to render a fuzzy dark halo because
-the red ink outline sits mostly in the transparent pixels *beyond* the alpha edge and
-`cover=max(sil,line)` painted that fading halo. Fixed in `recolorLayer`: output alpha = a
-*sharpened* silhouette (`(sil−0.35)/0.30`, ~1px transition, no wide fringe), and ink is **gated to
-inside the silhouette** (`sil>0.45`) so the halo is dropped. Internal seams (high alpha) are
-unaffected. Pure per-pixel, no neighbour ops.
+Current implementation (ported from `sketch_fill.js` into `app.js`):
+- **Regions = quantized (R,G)** via `keyMap` (cached per src). A region's key string `"R,G"` is
+  its stable ID. Artist-authored, so L/R sharing a value fill together and differing values fill
+  independently — both intentional (matches the user's "L/R split is valid" note; no merge needed).
+- **Pattern fill:** each region is filled with its fabric's **tiled swatch texture** (or solid
+  colour), clipped to the region mask via `destination-in`; tile density from `tileScale`
+  (`reps = 6·√(mean(tileScale)/6)`). `renderPart` → per-part canvas; layers cached by
+  `(comp|base|overrides)`; composite skirt→bodice→sleeve→collar.
+- **Crisp borders come for free:** masks ship **verbatim** (byte copy, no LANCZOS — resampling
+  would blur the flat values + thin gaps), alpha is bimodal, and outlines are the 1px mask
+  boundaries. No more fuzzy halo.
+- **Per-region assignment:** base fabric fills all regions; **tap a region → pick a fabric for
+  just that region** (`build.regionFabrics[componentId]["R,G"]`); uncoloured regions show paper
+  tone. Overrides cleared when the component changes/clears.
 
-**Fabric colours:** every fabric now carries a `color` = swatch albedo × material `_Color`
-tint (the shader's own math — a plain swatch average was wrong for tinted near-white albedos
-like Black Corduroy, whose albedo is off-white and colour lives in `_Color {0.12,0.13,0.16}`).
-Computed at build time by `tools/fabric_colors.py` (reads the sibling extract's materials),
-352/352 resolved. Slot fabric tiles use this colour too, so the build view matches the doll.
+**Tinted swatches (correctness for pattern fill):** `tools/fabric_swatches.py` bakes
+`albedo × material _Color` into each shipped swatch (256px) — raw albedo is near-white for dyed
+cloth (Black Corduroy) so tiling it would look washed-out. Also yields a representative solid
+`color` (solid-dyed fabrics + fallback). 287 tinted patterns + 65 solid; `tileScale` shipped per
+fabric. The fabric picker + slot tiles now show true colours too.
 
-**Per-region colouring on the doll (aesthetic) — DONE 2026-09-27.** The 2D sketch is one
-silhouette per component, but the **red seam lines partition it into enclosed sub-regions**
-that we recover ourselves: `tools/segment_regions.py` flood-fills `silhouette − dilated(red
-seams)` (scipy) into regions and **bakes each region's ID into the sketch's unused BLUE
-channel** (idempotent, derived from R/A; runs every build; zero new assets). The doll canvas
-reads blue → fills each region with its assigned fabric colour, and hit-tests clicks:
-**tap a region → pick a fabric for just that region** (`build.regionFabrics[componentId]
-[regionId]`, aesthetic override; base = the slot fabric). Verified: bodice central panel
-merlot + neckline teal over a Burlap base.
-- Region IDs are stable (sorted by centroid top→bottom); overrides cleared when the component
-  changes/clears.
-- **Segmentation merge pass (improved 2026-09-27):** decorative pleat/gather lines used to
-  fragment tiers (Ruffle Skirt → 29 regions). Added a merge step — absorb the smallest region
-  into its best SAME-HORIZONTAL-BAND neighbour (max y-overlap, tie-broken by shared border),
-  capped at **≤8 regions, min 5% area each**. Turns ruffle/tier fragments into clean horizontal
-  **tiers** while leaving distinct panels (bodice L/R, jacket) intact. Region-count distribution
-  now tops out at 8 (was 2–29); verified in-app (ruffle skirt = colourable tiers). Params in
-  `tools/segment_regions.py`: SEAM_T 60, SIL_T 40, DILATE 2, SPECK 0.3%, MIN_FRAC 5%, MAX 8.
-- **DESIGN DECISION (user, 2026-09-27):** left/right splits within a tier are VALID — they are
-  real seams in the artwork, not a segmentation bug. Do NOT add a symmetric/mirror L↔R merge
-  rule; keep these as separate colourable regions.
+Verified in-app: floral bodice + gingham sleeve + check skirt + solid collar tile correctly with
+crisp borders; a per-region override (gingham waistband) renders over the base.
 
-**Per-panel CALC — separate next task (not started).** The `zones` bitmask (1=Front/2=Back/
-4=Left/8=Right, higher bits = extra bands) + per-panel 3D `area` in `fabricByVariation[].panels[]`
-let us wire per-panel fabric into cost / composition % / area-weighted tags exactly (incl. back
-panels with no 2D region). That's the meaningful place per-panel changes outcomes — do it next.
-Region↔panel mapping method (segment → classify by `zones` → match by centroid/side) is
-documented; the colouring above does NOT depend on it.
+**Per-panel CALC — separate next task (not started).** Sketch regions are NOT fabric panels
+(SKETCH_COLORING.md: only 16/153 match; no region↔panel mapping in data). Pattern fill is
+**cosmetic**. Scoring still uses per-slot fabric today; per-panel calc uses
+`fabricByVariation[].panels[]` (name, 3D `area`, `dims`, `zones` bitmask 1=F/2=B/4=L/8=R) →
+cost / composition % / area-weighted tags. Keep the two surfaces separate.
 
 ## Known issues / warnings
 - **ColorTypeRequirement / FabricTypeRequirement allowed-lists are not in the extract** — they

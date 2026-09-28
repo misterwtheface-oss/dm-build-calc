@@ -13,6 +13,7 @@ copies and keep the calculator repo lean + Pages-friendly.
 """
 import json
 import os
+import shutil
 import sys
 from PIL import Image
 
@@ -36,11 +37,16 @@ def main():
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         try:
-            with Image.open(src) as im:
-                im = im.convert("RGBA")
-                if mx and (im.width > mx or im.height > mx):
-                    im.thumbnail((mx, mx), Image.LANCZOS)
-                im.save(dst, "PNG", optimize=True)
+            if e.get("copy"):
+                # verbatim byte copy — used for region MASKS, where resampling would blur the
+                # flat (R,G) region values and the thin transparent gaps between regions.
+                shutil.copy2(src, dst)
+            else:
+                with Image.open(src) as im:
+                    im = im.convert("RGBA")
+                    if mx and (im.width > mx or im.height > mx):
+                        im.thumbnail((mx, mx), Image.LANCZOS)
+                    im.save(dst, "PNG", optimize=True)
             copied += 1
         except Exception as ex:  # noqa: BLE001
             failed += 1
